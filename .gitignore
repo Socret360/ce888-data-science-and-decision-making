@@ -128,3 +128,5 @@ dmypy.json
 # Pyre type checker
 .pyre/
 git_setup.sh
+
+project/data/*

@@ -240,7 +240,7 @@ def read_participant_measurements(participant, sampling_rate=1):
       A tuple containing the `participant` combined and tagged DataFrame, start time, and end time of their experiment.
     """
     combined, start_time, end_time = combine_participant_measurements(participant, sampling_rate)
-    task_tags = read_participant_task_tags(os.path.join(participant, f"tags_{participant.split(os.sep)[-1]}.csv"))
+    task_tags = read_participant_task_tags(os.path.join(participant, f"tags_{os.path.basename(os.path.normpath(participant))}.csv"))
     tagged = determine_timestamp_stress_status_of_participant(combined, task_tags)
     return tagged, start_time, end_time
 

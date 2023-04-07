@@ -4,7 +4,7 @@ import pandas as pd
 import seaborn as sns
 from functools import reduce
 import matplotlib.pyplot as plt
-from itertools import islice, chain, repeat
+from itertools import islice, chain, repeat, combinations
 
 
 def read_raw_measurement_file(filepath, columns=None):
@@ -338,27 +338,6 @@ def clip_participant_experiment_data(df, leading=240, trailing=240):
     return temp
 
 
-def moving_window(df, window_size=64, step=1):
-    """ Sliding window generator for moving across `df`.
-
-    Args:
-    ---
-    - `df`: DataFrame
-        The DataFrame to slide across.
-    - `window_size`: int, Optional. Defaults to 64 samples
-        The number of samples per window.
-    - `step`: int, Optional. Defaults to 1 sample.
-        The step size to move forward.
-
-    Returns:
-    ---
-    Generator[DataFrame, Series]
-        A generator that yields a window and its label.
-    """
-    for idx in range(0, len(df)-window_size, step):
-        yield df.iloc[idx:idx+window_size], df.iloc[idx+window_size]
-
-
 def leave_one_participant_out_cv(df):
     """ A generator for performing leave one participant out cross validation.
 
@@ -375,3 +354,189 @@ def leave_one_participant_out_cv(df):
     participants = df['participant'].unique().tolist()
     for participant in participants:
         yield [p for p in participants if p != participant], participant
+
+
+def get_all_combinations(options):
+    """ Returns all combinations of different sizes from `options`.
+
+    Args:
+    ---
+    - `options`: List[Any]
+      A python list.
+
+    Returns:
+    ---
+    List[Tuple[Any]]
+      A python list containing all of the possible combinations of `options`.
+    """
+    results = []
+
+    for i in range(1, len(options)+1):
+        results += list(combinations(options, i))
+
+    return results
+
+
+def sliding_windows(num_samples, window_size=5, stride=1):
+    """ Returns sliding window idxes of size `window_size` and `stride` for usage with numpy indexing.
+
+    Args:
+    ---
+    - `num_samples`: int
+      The number of samples in the dataset.
+    - `window_size`: int
+      The size of the sliding window.
+    - `stride`: int
+      The movement step size of the sliding window.
+
+    Returns:
+    ---
+    Tuple[ndarray, ndarray]
+      A tuple of X_indxes, y_indxes.
+
+    References:
+    ---
+    - https://towardsdatascience.com/fast-and-robust-sliding-window-vectorization-with-numpy-3ad950ed62f5
+    """
+    max_index = num_samples - window_size
+
+    sub_windows = (
+        0 +
+        np.expand_dims(np.arange(window_size), 0) +
+        np.expand_dims(np.arange(max_index, step=stride), 0).T
+    )
+
+    return sub_windows, sub_windows[:, -1]+1
+
+
+def preprocess(
+    df,
+    window_size=240,
+    stride=32,
+    features=["ACC", "IBI", "TEMP", "EDA", "HR"],
+    **kargs
+):
+    """ Preprocess time series using sliding windows of `window_size` and `stride`.
+
+    Args:
+    ---
+    - `df`: DataFrame
+      The time series dataframe.
+    - `window_size`: int
+      The window size of the sliding window.
+    - `features`: List[str], Optional. Default to ["ACC", "IBI", "TEMP", "EDA", "HR"]
+      The list of features from EmpaticaE4 to use for feature engineering.
+
+    Returns:
+    ---
+    DataFrame
+      A new dataframe containing all the engineered features from `features`.
+    """
+    temp = df.drop(['timestamp', 'stress', 'participant'], axis=1)
+    columns = temp.columns.tolist()
+
+    Xs, ys = temp.to_numpy(), df['stress'].to_numpy()
+
+    del temp
+
+    X_idxes, y_idxes = sliding_windows(len(Xs), window_size=window_size, stride=stride)
+
+    Xs, ys = Xs[X_idxes], ys[y_idxes]
+
+    del X_idxes
+    del y_idxes
+
+    new_columns = []
+
+    if "HR" in features:
+        heart_rates = Xs[:, :, columns.index("heart_rate")]
+        heart_rates = pd.DataFrame(
+            data=np.concatenate([
+                np.expand_dims(np.mean(heart_rates, axis=-1), axis=-1),
+                np.expand_dims(np.std(heart_rates, axis=-1), axis=-1),
+            ], axis=-1),
+            columns=["heart_rate_mean", "heart_rate_std"]
+        )
+        new_columns += [heart_rates]
+
+    if "IBI" in features:
+        ibis = Xs[:, :, columns.index("inter_beat_interval")]
+        ibis = pd.DataFrame(
+            data=np.sqrt(np.mean(np.power(np.diff(ibis, axis=-1), 2), axis=-1)),
+            columns=["hrv"]
+        )
+        new_columns += [ibis]
+
+    if "TEMP" in features:
+        skin_temp = Xs[:, :, columns.index("skin_temp")]
+        skin_temp = pd.DataFrame(
+            data=np.concatenate([
+                np.expand_dims(np.mean(skin_temp, axis=-1), axis=-1),
+                np.expand_dims(np.std(skin_temp, axis=-1), axis=-1),
+                np.expand_dims(np.max(skin_temp, axis=-1), axis=-1),
+                np.expand_dims(np.min(skin_temp, axis=-1), axis=-1),
+            ], axis=-1),
+            columns=["skin_temp_mean", "skin_temp_std", "skin_temp_max", "skin_temp_min"]
+        )
+        new_columns += [skin_temp]
+
+    if "EDA" in features:
+        edas = Xs[:, :, columns.index("eda")]
+        edas = pd.DataFrame(
+            data=np.concatenate([
+                np.expand_dims(np.mean(edas, axis=-1), axis=-1),
+                np.expand_dims(np.std(edas, axis=-1), axis=-1),
+                np.expand_dims(np.max(edas, axis=-1), axis=-1),
+                np.expand_dims(np.min(edas, axis=-1), axis=-1),
+            ], axis=-1),
+            columns=["eda_mean", "eda_std", "eda_max", "eda_min"]
+        )
+        new_columns += [edas]
+
+    if "ACC" in features:
+        accel_xs = Xs[:, :, columns.index("accel_x")]
+        accel_xs = pd.DataFrame(
+            data=np.concatenate([
+                np.expand_dims(np.mean(accel_xs, axis=-1), axis=-1),
+                np.expand_dims(np.std(accel_xs, axis=-1), axis=-1),
+            ], axis=-1),
+            columns=["accel_x_mean", "accel_x_std"]
+        )
+
+        accel_ys = Xs[:, :, columns.index("accel_y")]
+        accel_ys = pd.DataFrame(
+            data=np.concatenate([
+                np.expand_dims(np.mean(accel_ys, axis=-1), axis=-1),
+                np.expand_dims(np.std(accel_ys, axis=-1), axis=-1),
+            ], axis=-1),
+            columns=["accel_y_mean", "accel_y_std"]
+        )
+
+        accel_zs = Xs[:, :, columns.index("accel_z")]
+        accel_zs = pd.DataFrame(
+            data=np.concatenate([
+                np.expand_dims(np.mean(accel_zs, axis=-1), axis=-1),
+                np.expand_dims(np.std(accel_zs, axis=-1), axis=-1),
+            ], axis=-1),
+            columns=["accel_z_mean", "accel_z_std"]
+        )
+
+        accel_3ds = Xs[:, :, [columns.index("accel_x"), columns.index("accel_y"), columns.index("accel_z")]]
+        accel_3ds = np.power(accel_3ds, 2)
+        accel_3ds = np.sum(accel_3ds, axis=-1)
+        accel_3ds = np.sqrt(accel_3ds)
+        accel_3ds = pd.DataFrame(
+            data=np.concatenate([
+                np.expand_dims(np.mean(accel_3ds, axis=-1), axis=-1),
+                np.expand_dims(np.std(accel_3ds, axis=-1), axis=-1),
+            ], axis=-1),
+            columns=["accel_3d_mean", "accel_3d_std"]
+        )
+
+        new_columns += [accel_xs, accel_ys, accel_zs, accel_3ds]
+
+    target = pd.DataFrame(data=ys, columns=["stress"])
+
+    new_columns += [target]
+
+    return pd.concat(new_columns, axis=1)

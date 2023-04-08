@@ -1,10 +1,14 @@
 import os
+import csv
+import ast
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from tqdm.auto import tqdm
 from functools import reduce
 import matplotlib.pyplot as plt
-from itertools import islice, chain, repeat, combinations
+from itertools import islice, chain, repeat, combinations, product
+from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, accuracy_score
 
 
 def read_raw_measurement_file(filepath, columns=None):
@@ -540,3 +544,70 @@ def preprocess(
     new_columns += [target]
 
     return pd.concat(new_columns, axis=1)
+
+
+def start_cross_validation(param_grid, df, model, output_filepath="cv_results.csv"):
+    all_params = list(product(*[v for _, v in param_grid.items()]))
+
+    # if the file existed before, filter out configurations that has already been tested
+    previous_version_existed = os.path.exists(output_filepath)
+    if previous_version_existed:
+        results = pd.read_csv(
+            output_filepath,
+            usecols=list(param_grid.keys()),
+            converters={"data__features": ast.literal_eval} if "data__features" in list(param_grid.keys()) else None
+        )\
+            .replace(np.nan, None)\
+            .values.tolist()
+        all_params = [i for i in all_params if list(i) not in results]
+
+    with open(output_filepath, 'a+') as csvfile:
+        fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score", "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+
+        if not previous_version_existed:
+            writer.writeheader()
+
+        for param_values in tqdm(all_params, desc="Configurations"):
+            params = dict(zip(param_grid.keys(), param_values))
+            data_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "data"}
+            clf_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "clf"}
+
+            split_results = []
+
+            for train_participants, validation_participant in tqdm(list(leave_one_participant_out_cv(df)), desc=f"CV"):
+                train = df[df['participant'].isin(train_participants)]
+                train = preprocess(train, **data_params)
+
+                validation = df[df['participant'].isin([validation_participant])]
+                validation = preprocess(validation, **data_params)
+
+                X_train, y_train = train.drop(['stress'], axis=1), train['stress'].copy()
+                X_val, y_val = validation.drop(['stress'], axis=1), validation['stress'].copy()
+
+                clf = model(**clf_params)
+                clf.fit(X_train, y_train)
+
+                y_pred = clf.predict(X_val)
+
+                tn, fp, fn, tp = confusion_matrix(y_val, y_pred).ravel()
+
+                evaluations = {
+                    "accuracy": accuracy_score(y_val, y_pred),
+                    "recall_score": recall_score(y_val, y_pred),
+                    "precision_score": precision_score(y_val, y_pred),
+                    "f1_score": f1_score(y_val, y_pred),
+                    "tn": tn,
+                    "fp": fp,
+                    "fn": fn,
+                    "tp": tp,
+                }
+
+                sets = {
+                    "split_val": validation_participant,
+                    "split_train": ",".join(train_participants)
+                }
+
+                split_results.append(dict(params, **evaluations, **sets))
+
+            writer.writerows(split_results)

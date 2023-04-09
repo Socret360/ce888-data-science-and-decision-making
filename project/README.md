@@ -26,12 +26,13 @@ scikit-learn===1.2.2   # developing machine learning models.
 ```shell
 project
 │───assets            # Images of graphs and figures.
-|───data              # Raw and processed data.
-|───output            # Output of experiments.
-|   experiment.ipynb  # Jupyter notebook of main experiment.
-|   README.md         # Project Documenttation.
-|   requirements.txt  # Requirements file.
-|   utils.py          # Utils functions used in `experiments.ipynb`.
+│───data              # Raw and processed data.
+│───output            # Output of experiments.
+│   experiment.ipynb  # Jupyter notebook of main experiment.
+│   inference.py      # Module for running inference on custom inputs.
+│   README.md         # Project Documenttation.
+│   requirements.txt  # Requirements file.
+│   utils.py          # Utils functions used in `experiments.ipynb`.
 ```
 
 # 3. How to run

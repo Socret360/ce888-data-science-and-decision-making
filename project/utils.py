@@ -4,6 +4,7 @@ import ast
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from time import sleep
 from tqdm.auto import tqdm
 from functools import reduce
 import matplotlib.pyplot as plt
@@ -561,53 +562,70 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
             .values.tolist()
         all_params = [i for i in all_params if list(i) not in results]
 
-    with open(output_filepath, 'a+') as csvfile:
-        fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score", "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
-        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score", "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
 
-        if not previous_version_existed:
+    if not previous_version_existed:
+        with open(output_filepath, 'a+') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writeheader()
+            csvfile.flush()
+            csvfile.close()
 
-        for param_values in tqdm(all_params, desc="Configurations"):
-            params = dict(zip(param_grid.keys(), param_values))
-            data_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "data"}
-            clf_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "clf"}
+    cv_splits = list(leave_one_participant_out_cv(df))
 
-            split_results = []
+    outter_pbar = tqdm(all_params, desc="Configurations")
+    inner_pbar = tqdm(cv_splits, desc=f"CV", leave=False)
 
-            for train_participants, validation_participant in tqdm(list(leave_one_participant_out_cv(df)), desc=f"CV"):
-                train = df[df['participant'].isin(train_participants)]
-                train = preprocess(train, **data_params)
+    for param_values in all_params:
+        params = dict(zip(param_grid.keys(), param_values))
+        data_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "data"}
+        clf_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "clf"}
 
-                validation = df[df['participant'].isin([validation_participant])]
-                validation = preprocess(validation, **data_params)
+        split_results = []
 
-                X_train, y_train = train.drop(['stress'], axis=1), train['stress'].copy()
-                X_val, y_val = validation.drop(['stress'], axis=1), validation['stress'].copy()
+        for train_participants, validation_participant in cv_splits:
+            train = df[df['participant'].isin(train_participants)]
+            train = preprocess(train, **data_params)
 
-                clf = model(**clf_params)
-                clf.fit(X_train, y_train)
+            validation = df[df['participant'].isin([validation_participant])]
+            validation = preprocess(validation, **data_params)
 
-                y_pred = clf.predict(X_val)
+            X_train, y_train = train.drop(['stress'], axis=1), train['stress'].copy()
+            X_val, y_val = validation.drop(['stress'], axis=1), validation['stress'].copy()
 
-                tn, fp, fn, tp = confusion_matrix(y_val, y_pred).ravel()
+            clf = model(**clf_params)
+            clf.fit(X_train, y_train)
 
-                evaluations = {
-                    "accuracy": accuracy_score(y_val, y_pred),
-                    "recall_score": recall_score(y_val, y_pred),
-                    "precision_score": precision_score(y_val, y_pred),
-                    "f1_score": f1_score(y_val, y_pred),
-                    "tn": tn,
-                    "fp": fp,
-                    "fn": fn,
-                    "tp": tp,
-                }
+            y_pred = clf.predict(X_val)
 
-                sets = {
-                    "split_val": validation_participant,
-                    "split_train": ",".join(train_participants)
-                }
+            tn, fp, fn, tp = confusion_matrix(y_val, y_pred).ravel()
 
-                split_results.append(dict(params, **evaluations, **sets))
+            evaluations = {
+                "accuracy": accuracy_score(y_val, y_pred),
+                "recall_score": recall_score(y_val, y_pred),
+                "precision_score": precision_score(y_val, y_pred),
+                "f1_score": f1_score(y_val, y_pred),
+                "tn": tn,
+                "fp": fp,
+                "fn": fn,
+                "tp": tp,
+            }
 
+            sets = {
+                "split_val": validation_participant,
+                "split_train": ",".join(train_participants)
+            }
+
+            split_results.append(dict(params, **evaluations, **sets))
+
+            inner_pbar.update(1)
+
+        inner_pbar.reset()
+
+        with open(output_filepath, 'a+') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
             writer.writerows(split_results)
+            csvfile.flush()
+            csvfile.close()
+
+        outter_pbar.update(1)

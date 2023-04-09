@@ -130,3 +130,4 @@ dmypy.json
 git_setup.sh
 
 project/data/*
+project/temp.py

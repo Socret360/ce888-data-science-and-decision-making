@@ -1,10 +1,20 @@
+"""A module containing utility functions used throughout the project.
+
+This module contains functions that is imported and used throughout this project. The functions are used for:
+- preprocessing
+- visualisation
+- cross validation
+
+Author: Socretquuliqaa <lee.socret@gmail.com>
+Created: 09/04/2023
+"""
+
 import os
 import csv
 import ast
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from time import sleep
 from tqdm.auto import tqdm
 from functools import reduce
 import matplotlib.pyplot as plt
@@ -325,10 +335,10 @@ def clip_participant_experiment_data(df, leading=240, trailing=240):
     ---
     - `df`: DataFrame
       The participant experiment data.
-    - `leading`: int, Optional. Default to 240
-      The number of seconds before the first stress period.
-    - `trailing`: int, Optional. Default to 240
-      The number of seconds after the last stress period.
+    - `leading`: int, optional
+      The number of seconds before the first stress period. (Default to 240)
+    - `trailing`: int, optional
+      The number of seconds after the last stress period. (Default to 240)
 
     Returns:
     ---
@@ -419,7 +429,7 @@ def preprocess(
     window_size=240,
     stride=32,
     features=["ACC", "IBI", "TEMP", "EDA", "HR"],
-    **kargs
+    **kargs  # this is added for parameter spread support
 ):
     """ Preprocess time series using sliding windows of `window_size` and `stride`.
 
@@ -429,8 +439,8 @@ def preprocess(
       The time series dataframe.
     - `window_size`: int
       The window size of the sliding window.
-    - `features`: List[str], Optional. Default to ["ACC", "IBI", "TEMP", "EDA", "HR"]
-      The list of features from EmpaticaE4 to use for feature engineering.
+    - `features`: List[str], optional
+      The list of features from EmpaticaE4 to use for feature engineering. (Default is ["ACC", "IBI", "TEMP", "EDA", "HR"])
 
     Returns:
     ---
@@ -444,7 +454,11 @@ def preprocess(
 
     del temp
 
-    X_idxes, y_idxes = sliding_windows(len(Xs), window_size=window_size, stride=stride)
+    X_idxes, y_idxes = sliding_windows(
+        len(Xs),
+        window_size=window_size,
+        stride=stride
+    )
 
     Xs, ys = Xs[X_idxes], ys[y_idxes]
 
@@ -467,7 +481,8 @@ def preprocess(
     if "IBI" in features:
         ibis = Xs[:, :, columns.index("inter_beat_interval")]
         ibis = pd.DataFrame(
-            data=np.sqrt(np.mean(np.power(np.diff(ibis, axis=-1), 2), axis=-1)),
+            data=np.sqrt(
+                np.mean(np.power(np.diff(ibis, axis=-1), 2), axis=-1)),  # Root Mean Square of Successive Differences between Normal Heartbeats (RMSSD)
             columns=["hrv"]
         )
         new_columns += [ibis]
@@ -481,7 +496,8 @@ def preprocess(
                 np.expand_dims(np.max(skin_temp, axis=-1), axis=-1),
                 np.expand_dims(np.min(skin_temp, axis=-1), axis=-1),
             ], axis=-1),
-            columns=["skin_temp_mean", "skin_temp_std", "skin_temp_max", "skin_temp_min"]
+            columns=["skin_temp_mean", "skin_temp_std",
+                     "skin_temp_max", "skin_temp_min"]
         )
         new_columns += [skin_temp]
 
@@ -526,7 +542,8 @@ def preprocess(
             columns=["accel_z_mean", "accel_z_std"]
         )
 
-        accel_3ds = Xs[:, :, [columns.index("accel_x"), columns.index("accel_y"), columns.index("accel_z")]]
+        accel_3ds = Xs[:, :, [columns.index("accel_x"), columns.index(
+            "accel_y"), columns.index("accel_z")]]
         accel_3ds = np.power(accel_3ds, 2)
         accel_3ds = np.sum(accel_3ds, axis=-1)
         accel_3ds = np.sqrt(accel_3ds)
@@ -548,6 +565,19 @@ def preprocess(
 
 
 def start_cross_validation(param_grid, df, model, output_filepath="cv_results.csv"):
+    """ Start cross validation loop with different configurations from `param_grid` using `model`.
+
+    Args:
+    ---
+    - `param_grid`: Dict[str,List[Any]]
+      The param grid to perform grid search.
+    - `df`: DataFrame
+      The dataset to perform cross validation on.
+    - `model`: ClassifierMixin
+      The sklearn classification model to train.
+    - `output_filepath`: str, Optional. Default is 
+      The path to save output file.
+    """
     all_params = list(product(*[v for _, v in param_grid.items()]))
 
     # if the file existed before, filter out configurations that has already been tested
@@ -556,14 +586,17 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
         results = pd.read_csv(
             output_filepath,
             usecols=list(param_grid.keys()),
-            converters={"data__features": ast.literal_eval} if "data__features" in list(param_grid.keys()) else None
+            converters={"data__features": ast.literal_eval} if "data__features" in list(
+                param_grid.keys()) else None
         )\
             .replace(np.nan, None)\
             .values.tolist()
         all_params = [i for i in all_params if list(i) not in results]
 
-    fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score", "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
+    fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score",
+                                            "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
 
+    # if first time creating the output file, then write csv header
     if not previous_version_existed:
         with open(output_filepath, 'a+') as csvfile:
             writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
@@ -578,8 +611,10 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
 
     for param_values in all_params:
         params = dict(zip(param_grid.keys(), param_values))
-        data_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "data"}
-        clf_params = {k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "clf"}
+        data_params = {
+            k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "data"}
+        clf_params = {
+            k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "clf"}
 
         split_results = []
 
@@ -590,8 +625,10 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
             validation = df[df['participant'].isin([validation_participant])]
             validation = preprocess(validation, **data_params)
 
-            X_train, y_train = train.drop(['stress'], axis=1), train['stress'].copy()
-            X_val, y_val = validation.drop(['stress'], axis=1), validation['stress'].copy()
+            X_train, y_train = train.drop(
+                ['stress'], axis=1), train['stress'].copy()
+            X_val, y_val = validation.drop(
+                ['stress'], axis=1), validation['stress'].copy()
 
             clf = model(**clf_params)
             clf.fit(X_train, y_train)

@@ -635,13 +635,13 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
 
             y_pred = clf.predict(X_val)
 
-            tn, fp, fn, tp = confusion_matrix(y_val, y_pred).ravel()
+            acc, precision, recall, f1, tn, fp, fn, tp = evaluate(y_val, y_pred)
 
             evaluations = {
-                "accuracy": accuracy_score(y_val, y_pred),
-                "recall_score": recall_score(y_val, y_pred),
-                "precision_score": precision_score(y_val, y_pred),
-                "f1_score": f1_score(y_val, y_pred),
+                "accuracy": acc,
+                "recall_score": recall,
+                "precision_score": precision,
+                "f1_score": f1,
                 "tn": tn,
                 "fp": fp,
                 "fn": fn,
@@ -666,3 +666,12 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
             csvfile.close()
 
         outter_pbar.update(1)
+
+
+def evaluate(y_true, y_pred):
+    acc = accuracy_score(y_true, y_pred)
+    recall = recall_score(y_true, y_pred)
+    precision = precision_score(y_true, y_pred)
+    f1 = f1_score(y_true, y_pred)
+    tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
+    return acc, precision, recall, f1, tn, fp, fn, tp

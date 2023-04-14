@@ -564,8 +564,9 @@ def preprocess(
     return pd.concat(new_columns, axis=1)
 
 
-def start_cross_validation(param_grid, df, model, output_filepath="cv_results.csv"):
-    """ Start cross validation loop with different configurations from `param_grid` using `model`.
+def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_results.csv"):
+    """ Start hyper parameter tuning process with configurations from `param_grid` using `model`.
+    Each hyperparameter configuration undergoes a leave-one-participant out cross validation loop.
 
     Args:
     ---
@@ -580,7 +581,7 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
     """
     all_params = list(product(*[v for _, v in param_grid.items()]))
 
-    # if the file existed before, filter out configurations that has already been tested
+    # if the `output_filepath` existed before, filter out hyperparameters that has already been tested
     previous_version_existed = os.path.exists(output_filepath)
     if previous_version_existed:
         results = pd.read_csv(
@@ -591,7 +592,10 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
         )\
             .replace(np.nan, None)\
             .values.tolist()
-        all_params = [i for i in all_params if list(i) not in results]
+
+        if len(results) > 0:
+          print(f"previous configurations found: skipped {len(results)}")
+          all_params = [i for i in all_params if list(i) not in results]
 
     fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score",
                                             "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
@@ -669,9 +673,31 @@ def start_cross_validation(param_grid, df, model, output_filepath="cv_results.cs
 
 
 def evaluate(y_true, y_pred):
+    """ Calculates accuracy, precision, recall, f1, tn, fp, fn, tp from `y_true`, `y_pred`.
+
+    Args:
+    ---
+    - `y_true`: List[Any]
+      List of target value.
+    - `y_pred`: List[Any]
+      List of predicted value that are the output of classifier.
+    
+    Returns:
+    ---
+    Tuple[float, float, float, float, int, int, int, int, int]
+      Evaluations output in the form of (accuracy, precision, recall, f1, tn, fp, fn, tp)
+    """
     acc = accuracy_score(y_true, y_pred)
     recall = recall_score(y_true, y_pred)
     precision = precision_score(y_true, y_pred)
     f1 = f1_score(y_true, y_pred)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     return acc, precision, recall, f1, tn, fp, fn, tp
+
+def read_test_result(filepath, param_grid):
+    result = pd.read_csv(filepath)\
+              .drop(['tp', 'fp', 'tn', 'fn'], axis=1)\
+              .groupby(list(param_grid.keys()), dropna=False).agg(['mean'])\
+              .reset_index()
+    result.columns = ["_".join(c) if c[-1] != "" else c[0] for c in result.columns.to_flat_index()]
+    return result

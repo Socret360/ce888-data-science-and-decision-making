@@ -4,6 +4,7 @@ This module contains functions that is imported and used throughout this project
 - preprocessing
 - visualisation
 - cross validation
+- hyperparameter tuning
 
 Author: Socretquuliqaa <lee.socret@gmail.com>
 Created: 09/04/2023
@@ -421,11 +422,12 @@ def sliding_windows(num_samples, window_size=5, stride=1):
         np.expand_dims(np.arange(max_index, step=stride), 0).T
     )
 
-    return sub_windows, sub_windows[:, -1]+1
+    return sub_windows
 
 
 def preprocess(
-    df,
+    X,
+    y=None,
     window_size=240,
     stride=32,
     features=["ACC", "IBI", "TEMP", "EDA", "HR"],
@@ -435,8 +437,10 @@ def preprocess(
 
     Args:
     ---
-    - `df`: DataFrame
-      The time series dataframe.
+    - `X`: DataFrame
+      The features time series dataframe.
+    - `y`: DataFrame, optional.
+      The target dataframe. (Default is None)
     - `window_size`: int
       The window size of the sliding window.
     - `features`: List[str], optional
@@ -444,26 +448,22 @@ def preprocess(
 
     Returns:
     ---
-    DataFrame
-      A new dataframe containing all the engineered features from `features`.
+    Tuple[ndarray, ndarray]
+      A tuple in the form of X, y.
     """
-    temp = df.drop(['timestamp', 'stress', 'participant'], axis=1)
-    columns = temp.columns.tolist()
+    columns = X.columns.tolist()
 
-    Xs, ys = temp.to_numpy(), df['stress'].to_numpy()
+    Xs = X.to_numpy()
 
-    del temp
+    X_idxes = sliding_windows(len(Xs), window_size=window_size, stride=stride)
 
-    X_idxes, y_idxes = sliding_windows(
-        len(Xs),
-        window_size=window_size,
-        stride=stride
-    )
+    Xs = Xs[X_idxes]
 
-    Xs, ys = Xs[X_idxes], ys[y_idxes]
+    if y is not None:
+        ys = y.to_numpy()
+        ys = ys[X_idxes[:, -1]+1]
 
     del X_idxes
-    del y_idxes
 
     new_columns = []
 
@@ -557,11 +557,7 @@ def preprocess(
 
         new_columns += [accel_xs, accel_ys, accel_zs, accel_3ds]
 
-    target = pd.DataFrame(data=ys, columns=["stress"])
-
-    new_columns += [target]
-
-    return pd.concat(new_columns, axis=1)
+    return pd.concat(new_columns, axis=1).to_numpy(), ys if y is not None else None
 
 
 def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_results.csv"):
@@ -576,8 +572,8 @@ def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_resul
       The dataset to perform cross validation on.
     - `model`: ClassifierMixin
       The sklearn classification model to train.
-    - `output_filepath`: str, Optional. Default is 
-      The path to save output file.
+    - `output_filepath`: str, Optional
+      The path to save output file. (Default is cv_results.csv)
     """
     all_params = list(product(*[v for _, v in param_grid.items()]))
 
@@ -594,8 +590,8 @@ def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_resul
             .values.tolist()
 
         if len(results) > 0:
-          print(f"previous configurations found: skipped {len(results)}")
-          all_params = [i for i in all_params if list(i) not in results]
+            print(f"previous configurations found: skipped {len(results)}")
+            all_params = [i for i in all_params if list(i) not in results]
 
     fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score",
                                             "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
@@ -624,15 +620,20 @@ def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_resul
 
         for train_participants, validation_participant in cv_splits:
             train = df[df['participant'].isin(train_participants)]
-            train = preprocess(train, **data_params)
+            train = train.drop(['timestamp', 'participant'], axis=1)
+            X_train, y_train = preprocess(
+                train.drop(['stress'], axis=1),
+                train['stress'],
+                **data_params
+            )
 
             validation = df[df['participant'].isin([validation_participant])]
-            validation = preprocess(validation, **data_params)
-
-            X_train, y_train = train.drop(
-                ['stress'], axis=1), train['stress'].copy()
-            X_val, y_val = validation.drop(
-                ['stress'], axis=1), validation['stress'].copy()
+            validation = validation.drop(['timestamp', 'participant'], axis=1)
+            X_val, y_val = preprocess(
+                validation.drop(['stress'], axis=1),
+                validation['stress'],
+                **data_params
+            )
 
             clf = model(**clf_params)
             clf.fit(X_train, y_train)
@@ -681,7 +682,7 @@ def evaluate(y_true, y_pred):
       List of target value.
     - `y_pred`: List[Any]
       List of predicted value that are the output of classifier.
-    
+
     Returns:
     ---
     Tuple[float, float, float, float, int, int, int, int, int]
@@ -694,10 +695,25 @@ def evaluate(y_true, y_pred):
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
     return acc, precision, recall, f1, tn, fp, fn, tp
 
+
 def read_test_result(filepath, param_grid):
+    """ Read the test result file.
+
+    Args:
+    ---
+    - `filepath`: str
+      The path to test file.
+    - `param_grid`: Dict[str, Any]
+      The param configurations to try.
+
+    Returns:
+    ---
+    DataFrame
+      The test result DataFrame.
+    """
     result = pd.read_csv(filepath)\
-              .drop(['tp', 'fp', 'tn', 'fn'], axis=1)\
-              .groupby(list(param_grid.keys()), dropna=False).agg(['mean'])\
-              .reset_index()
+        .drop(['tp', 'fp', 'tn', 'fn'], axis=1)\
+        .groupby(list(param_grid.keys()), dropna=False).agg(['mean', 'std'])\
+        .reset_index()
     result.columns = ["_".join(c) if c[-1] != "" else c[0] for c in result.columns.to_flat_index()]
     return result

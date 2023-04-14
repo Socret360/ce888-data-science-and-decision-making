@@ -31,7 +31,7 @@ if __name__ == "__main__":
     parser.add_argument('input', type=str, help='path to input csv file.')
     parser.add_argument('model_path', type=str, help='path to saved model folder that contains both the pickle and json files.')
     parser.add_argument('--output_dir', type=str,
-                        help='path to output directory.', default="output")
+                        help='path to output directory.', default=None)
     args = parser.parse_args()
 
     with open(os.path.join(args.model_path, "model.json"), 'r') as config_file:
@@ -50,8 +50,11 @@ if __name__ == "__main__":
     clf = pickle.load(open(os.path.join(args.model_path, "model.pkl"), 'rb'))
     y_pred = clf.predict(X)
 
-    # save the prediction to a csv file.
-    pd.DataFrame(
-        columns=['Stress'],
-        data=y_pred
-    ).to_csv(os.path.join(args.output_dir, "pred.csv"), index=False)
+    if args.output_dir is not None:
+        # save the prediction to a csv file.
+        pd.DataFrame(
+            columns=['Stress'],
+            data=y_pred
+        ).to_csv(os.path.join(args.output_dir, "pred.csv"), index=False)
+    else:
+        print(y_pred)

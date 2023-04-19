@@ -557,7 +557,7 @@ def preprocess(
 
         new_columns += [accel_xs, accel_ys, accel_zs, accel_3ds]
 
-    return pd.concat(new_columns, axis=1).to_numpy(), ys if y is not None else None
+    return pd.concat(new_columns, axis=1), ys if y is not None else None
 
 
 def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_results.csv"):

@@ -499,7 +499,7 @@ def preprocess(X, y=None, window_size=240, stride=32, features='all', return_gro
 
     new_columns = []
     if "HR" in features:
-        heart_rates = Xs[:, :, columns.index("heart_rate")]
+        heart_rates = Xs[:, :, columns.index("heart_rate")].astype('float')
         heart_rates = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(heart_rates, axis=-1), axis=-1),
                                                         np.expand_dims(np.std(heart_rates, axis=-1), axis=-1),
                                                         ], axis=-1),
@@ -508,7 +508,7 @@ def preprocess(X, y=None, window_size=240, stride=32, features='all', return_gro
         new_columns += [heart_rates]
 
     if "IBI" in features:
-        ibis = Xs[:, :, columns.index("inter_beat_interval")]
+        ibis = Xs[:, :, columns.index("inter_beat_interval")].astype('float')
         ibis = pd.DataFrame(data=np.sqrt(np.mean(np.power(np.diff(ibis, axis=-1), 2), axis=-1)),
                             # Root Mean Square of Successive Differences between Normal Heartbeats (RMSSD)
                             columns=["hrv"]
@@ -516,7 +516,7 @@ def preprocess(X, y=None, window_size=240, stride=32, features='all', return_gro
         new_columns += [ibis]
 
     if "TEMP" in features:
-        skin_temp = Xs[:, :, columns.index("skin_temp")]
+        skin_temp = Xs[:, :, columns.index("skin_temp")].astype('float')
         skin_temp = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(skin_temp, axis=-1), axis=-1),
                                                       np.expand_dims(np.std(skin_temp, axis=-1), axis=-1),
                                                       np.expand_dims(np.max(skin_temp, axis=-1), axis=-1),
@@ -527,7 +527,7 @@ def preprocess(X, y=None, window_size=240, stride=32, features='all', return_gro
         new_columns += [skin_temp]
 
     if "EDA" in features:
-        edas = Xs[:, :, columns.index("eda")]
+        edas = Xs[:, :, columns.index("eda")].astype('float')
         edas = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(edas, axis=-1), axis=-1),
                                                  np.expand_dims(np.std(edas, axis=-1), axis=-1),
                                                  np.expand_dims(np.max(edas, axis=-1), axis=-1),

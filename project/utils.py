@@ -12,15 +12,21 @@ Created: 09/04/2023
 
 import os
 import csv
-import ast
+import shelve
 import numpy as np
 import pandas as pd
 import seaborn as sns
+from skopt import BayesSearchCV  # pip install scikit-optimize
 from tqdm.auto import tqdm
 from functools import reduce
 import matplotlib.pyplot as plt
 from itertools import islice, chain, repeat, combinations, product
 from sklearn.metrics import f1_score, precision_score, recall_score, confusion_matrix, accuracy_score
+from sklearn.model_selection import GroupKFold, LeaveOneGroupOut
+from skopt.plots import plot_objective
+from sklearn import metrics
+import timeit
+
 
 
 def read_raw_measurement_file(filepath, columns=None):
@@ -268,12 +274,9 @@ def read_participant_measurements(participant, sampling_rate=1):
     Tuple[DataFrame, int, int]
       A tuple containing the `participant` combined and tagged DataFrame, start time, and end time of their experiment.
     """
-    combined, start_time, end_time = combine_participant_measurements(
-        participant, sampling_rate)
-    task_tags = read_participant_task_tags(os.path.join(
-        participant, f"tags_{os.path.basename(os.path.normpath(participant))}.csv"))
-    tagged = determine_timestamp_stress_status_of_participant(
-        combined, task_tags)
+    combined, start_time, end_time = combine_participant_measurements(participant, sampling_rate)
+    task_tags = read_participant_task_tags(os.path.join(participant, f"tags_{os.path.basename(os.path.normpath(participant))}.csv"))
+    tagged = determine_timestamp_stress_status_of_participant(combined, task_tags)
     return tagged, start_time, end_time
 
 
@@ -383,7 +386,7 @@ def get_all_combinations(options):
     Returns:
     ---
     List[Tuple[Any]]
-      A python list containing all of the possible combinations of `options`.
+      A python list containing all the possible combinations of `options`.
     """
     results = []
 
@@ -393,7 +396,7 @@ def get_all_combinations(options):
     return results
 
 
-def sliding_windows(num_samples, window_size=5, stride=1):
+def sliding_windows(num_samples, window_size=5, stride=1, future=1):
     """ Returns sliding window idxes of size `window_size` and `stride` for usage with numpy indexing.
 
     Args:
@@ -414,25 +417,53 @@ def sliding_windows(num_samples, window_size=5, stride=1):
     ---
     - https://towardsdatascience.com/fast-and-robust-sliding-window-vectorization-with-numpy-3ad950ed62f5
     """
-    max_index = num_samples - window_size
+    max_index = num_samples - window_size - future
 
-    sub_windows = (
-        0 +
-        np.expand_dims(np.arange(window_size), 0) +
-        np.expand_dims(np.arange(max_index, step=stride), 0).T
-    )
+    sub_windows = (0 + np.expand_dims(np.arange(window_size), 0) + np.expand_dims(np.arange(max_index, step=stride), 0).T)
 
     return sub_windows
 
 
-def preprocess(
-    X,
-    y=None,
-    window_size=240,
-    stride=32,
-    features=["ACC", "IBI", "TEMP", "EDA", "HR"],
-    **kargs  # this is added for parameter spread support
-):
+def prepare_data(df, inner_cv_n_split, outer_cv_n_split, params, test=True, df_test=pd.DataFrame()):
+    """Prepare data for CV and testing.
+
+    Args:
+        df: Input Dataframe containing original timeseries
+        label_key: Column name for tested outcome
+        models: Dict with ML config
+        inner_cv_n_split: Number of folds for inner CV loop
+        outer_cv_n_split: Number of folds for outer CV loop
+        features: List of signals from which to extract features in DF dataframe.
+        test: If True, prepare data for testing model
+        df_test: dataframe with the test data (the left-out participants, ids 28--35)
+
+    Returns:
+        Dictionary with data ready for training or testing model
+    """
+    X_train, y_train = df.drop(['stress'], axis=1), df['stress']
+    X_train, y_train, groups_train = preprocess(X_train, y_train, features=params['features'],
+                                                window_size=params['window_size'],
+                                                stride=params['stride'],
+                                                future=params['future'] if 'future' in params.keys() else 1,
+                                                return_groups=True)
+
+    inner_cv = GroupKFold(n_splits=inner_cv_n_split)
+    outer_cv = GroupKFold(n_splits=outer_cv_n_split)
+
+    input_for_cv = {"X": X_train, "y": y_train, "groups": groups_train, "outer_cv": outer_cv, "inner_cv": inner_cv}
+    if test:
+        X_test, y_test, groups_test = preprocess(df_test.drop(['stress'], axis=1), df_test['stress'],
+                                                 features=params['features'], window_size=params['window_size'],
+                                                 future=params['future'] if 'future' in params.keys() else 1,
+                                                 stride=params['stride'], return_groups=True)
+        input_for_cv['X_test'] = X_test
+        input_for_cv['y_test'] = y_test
+        input_for_cv['groups_test'] = groups_test
+
+    return input_for_cv
+
+
+def preprocess(X, y=None, window_size=240, stride=32, features='all', return_groups=False, future=1, **kargs):  # this is added for parameter spread support
     """ Preprocess time series using sliding windows of `window_size` and `stride`.
 
     Args:
@@ -444,123 +475,241 @@ def preprocess(
     - `window_size`: int
       The window size of the sliding window.
     - `features`: List[str], optional
-      The list of features from EmpaticaE4 to use for feature engineering. (Default is ["ACC", "IBI", "TEMP", "EDA", "HR"])
-
+      The list of features from EmpaticaE4 to use for feature engineering. (all = ["ACC", "IBI", "TEMP", "EDA", "HR"])
+    - `future`: int
+      The amount of rows into the future we want to predict (e.g., to see if we can predict stress 1 minute ahead of it occurring)
     Returns:
     ---
     Tuple[ndarray, ndarray]
       A tuple in the form of X, y.
     """
+    if features == 'all':
+        features = ["ACC", "IBI", "TEMP", "EDA", "HR"]
     columns = X.columns.tolist()
-
     Xs = X.to_numpy()
-
-    X_idxes = sliding_windows(len(Xs), window_size=window_size, stride=stride)
-
+    X_idxes = sliding_windows(len(Xs), window_size=window_size, stride=stride, future=future)
     Xs = Xs[X_idxes]
-
     if y is not None:
         ys = y.to_numpy()
-        ys = ys[X_idxes[:, -1]+1]
-
+        ys = ys[X_idxes[:, -1]+future]
+    if return_groups:
+        groups = X['participant'].to_numpy()
+        groups = groups[X_idxes[:, -1]+future]
     del X_idxes
 
     new_columns = []
-
     if "HR" in features:
         heart_rates = Xs[:, :, columns.index("heart_rate")]
-        heart_rates = pd.DataFrame(
-            data=np.concatenate([
-                np.expand_dims(np.mean(heart_rates, axis=-1), axis=-1),
-                np.expand_dims(np.std(heart_rates, axis=-1), axis=-1),
-            ], axis=-1),
-            columns=["heart_rate_mean", "heart_rate_std"]
-        )
+        heart_rates = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(heart_rates, axis=-1), axis=-1),
+                                                        np.expand_dims(np.std(heart_rates, axis=-1), axis=-1),
+                                                        ], axis=-1),
+                                   columns=["heart_rate_mean", "heart_rate_std"]
+                                   )
         new_columns += [heart_rates]
 
     if "IBI" in features:
         ibis = Xs[:, :, columns.index("inter_beat_interval")]
-        ibis = pd.DataFrame(
-            data=np.sqrt(
-                np.mean(np.power(np.diff(ibis, axis=-1), 2), axis=-1)),  # Root Mean Square of Successive Differences between Normal Heartbeats (RMSSD)
-            columns=["hrv"]
-        )
+        ibis = pd.DataFrame(data=np.sqrt(np.mean(np.power(np.diff(ibis, axis=-1), 2), axis=-1)),
+                            # Root Mean Square of Successive Differences between Normal Heartbeats (RMSSD)
+                            columns=["hrv"]
+                            )
         new_columns += [ibis]
 
     if "TEMP" in features:
         skin_temp = Xs[:, :, columns.index("skin_temp")]
-        skin_temp = pd.DataFrame(
-            data=np.concatenate([
-                np.expand_dims(np.mean(skin_temp, axis=-1), axis=-1),
-                np.expand_dims(np.std(skin_temp, axis=-1), axis=-1),
-                np.expand_dims(np.max(skin_temp, axis=-1), axis=-1),
-                np.expand_dims(np.min(skin_temp, axis=-1), axis=-1),
-            ], axis=-1),
-            columns=["skin_temp_mean", "skin_temp_std",
-                     "skin_temp_max", "skin_temp_min"]
-        )
+        skin_temp = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(skin_temp, axis=-1), axis=-1),
+                                                      np.expand_dims(np.std(skin_temp, axis=-1), axis=-1),
+                                                      np.expand_dims(np.max(skin_temp, axis=-1), axis=-1),
+                                                      np.expand_dims(np.min(skin_temp, axis=-1), axis=-1),
+                                                      ], axis=-1),
+                                 columns=["skin_temp_mean", "skin_temp_std", "skin_temp_max", "skin_temp_min"]
+                                 )
         new_columns += [skin_temp]
 
     if "EDA" in features:
         edas = Xs[:, :, columns.index("eda")]
-        edas = pd.DataFrame(
-            data=np.concatenate([
-                np.expand_dims(np.mean(edas, axis=-1), axis=-1),
-                np.expand_dims(np.std(edas, axis=-1), axis=-1),
-                np.expand_dims(np.max(edas, axis=-1), axis=-1),
-                np.expand_dims(np.min(edas, axis=-1), axis=-1),
-            ], axis=-1),
-            columns=["eda_mean", "eda_std", "eda_max", "eda_min"]
-        )
+        edas = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(edas, axis=-1), axis=-1),
+                                                 np.expand_dims(np.std(edas, axis=-1), axis=-1),
+                                                 np.expand_dims(np.max(edas, axis=-1), axis=-1),
+                                                 np.expand_dims(np.min(edas, axis=-1), axis=-1),
+                                                 ], axis=-1),
+                            columns=["eda_mean", "eda_std", "eda_max", "eda_min"]
+                            )
         new_columns += [edas]
 
     if "ACC" in features:
-        accel_xs = Xs[:, :, columns.index("accel_x")]
-        accel_xs = pd.DataFrame(
-            data=np.concatenate([
-                np.expand_dims(np.mean(accel_xs, axis=-1), axis=-1),
-                np.expand_dims(np.std(accel_xs, axis=-1), axis=-1),
-            ], axis=-1),
-            columns=["accel_x_mean", "accel_x_std"]
-        )
+        accel_xs = Xs[:, :, columns.index("accel_x")].astype('float')
+        accel_xs = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(accel_xs, axis=-1), axis=-1),
+                                                     np.expand_dims(np.std(accel_xs, axis=-1), axis=-1),
+                                                     ], axis=-1),
+                                columns=["accel_x_mean", "accel_x_std"]
+                                )
 
-        accel_ys = Xs[:, :, columns.index("accel_y")]
-        accel_ys = pd.DataFrame(
-            data=np.concatenate([
-                np.expand_dims(np.mean(accel_ys, axis=-1), axis=-1),
-                np.expand_dims(np.std(accel_ys, axis=-1), axis=-1),
-            ], axis=-1),
-            columns=["accel_y_mean", "accel_y_std"]
-        )
+        accel_ys = Xs[:, :, columns.index("accel_y")].astype('float')
+        accel_ys = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(accel_ys, axis=-1), axis=-1),
+                                                     np.expand_dims(np.std(accel_ys, axis=-1), axis=-1),
+                                                     ], axis=-1),
+                                columns=["accel_y_mean", "accel_y_std"]
+                                )
 
-        accel_zs = Xs[:, :, columns.index("accel_z")]
-        accel_zs = pd.DataFrame(
-            data=np.concatenate([
-                np.expand_dims(np.mean(accel_zs, axis=-1), axis=-1),
-                np.expand_dims(np.std(accel_zs, axis=-1), axis=-1),
-            ], axis=-1),
-            columns=["accel_z_mean", "accel_z_std"]
-        )
+        accel_zs = Xs[:, :, columns.index("accel_z")].astype('float')
+        accel_zs = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(accel_zs, axis=-1), axis=-1),
+                                                     np.expand_dims(np.std(accel_zs, axis=-1), axis=-1),
+                                                     ], axis=-1),
+                                columns=["accel_z_mean", "accel_z_std"]
+                                )
 
         accel_3ds = Xs[:, :, [columns.index("accel_x"), columns.index(
-            "accel_y"), columns.index("accel_z")]]
+            "accel_y"), columns.index("accel_z")]].astype('float')
         accel_3ds = np.power(accel_3ds, 2)
         accel_3ds = np.sum(accel_3ds, axis=-1)
         accel_3ds = np.sqrt(accel_3ds)
-        accel_3ds = pd.DataFrame(
-            data=np.concatenate([
-                np.expand_dims(np.mean(accel_3ds, axis=-1), axis=-1),
-                np.expand_dims(np.std(accel_3ds, axis=-1), axis=-1),
-            ], axis=-1),
-            columns=["accel_3d_mean", "accel_3d_std"]
-        )
-
+        accel_3ds = pd.DataFrame(data=np.concatenate([np.expand_dims(np.mean(accel_3ds, axis=-1), axis=-1),
+                                                      np.expand_dims(np.std(accel_3ds, axis=-1), axis=-1),
+                                                      ], axis=-1),
+                                 columns=["accel_3d_mean", "accel_3d_std"]
+                                 )
         new_columns += [accel_xs, accel_ys, accel_zs, accel_3ds]
+
+    if return_groups:
+        return pd.concat(new_columns, axis=1), ys if y is not None else None, groups
 
     return pd.concat(new_columns, axis=1), ys if y is not None else None
 
 
-def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_results.csv"):
+
+def fit_bayes_cv(X, y, groups, inner_cv, n_bayes_iter, param_grid, scoring, n_jobs, pipeline, nested=True,
+                 outer_cv=None, name_optim_file=None, filename_base='Results/Models/Optim/'):
+    """Peform Bayesian optimization for a model.
+
+    Args:
+        X: Input features
+        y: Labels
+        groups: For grouped CV
+        pipeline: skLearn pipeline
+        inner_cv: SkLearn CV Fold object with the inner CV loop
+        n_bayes_iter: Number of Bayesian Optimization search iterations
+        param_grid: Gridsearch params
+        scoring: SkLearn scorer function,
+        n_jobs: Number of CPU cores,
+        nested: Whether to use Nested CV,
+        outer_cv: SkLearn CV Fold object with the outer CV loop (for nested: True)
+        name_optim_file: Name of file to store optimisation visualisation
+    Returns:
+        Dict with Bayesian optimisation validation results
+    """
+    outer_cv_results = {"auc": [], "precision": [], "recall": [], "roc_curve": [], "best_train": [], "best_val": [],
+                        "best_params": [], "best_estimator": [],
+                        "prediction_df": []}
+    if nested:
+        outer_loop = outer_cv.split(X, y, groups)
+    else:
+        outer_loop = [(0, 0)]
+
+    for i, (train, test) in enumerate(outer_loop):
+        print('\t\tRunning iteration {}/{} of the outer loop'.format(i+1, outer_cv.get_n_splits()))
+        if nested:
+            X_train = X.iloc[train]
+            y_train = [y[i] for i in train]
+            group_train = [groups[i] for i in train]
+            X_test = X.iloc[test]
+            y_test = [y[i] for i in test]
+            group_test = [groups[i] for i in test]
+        else:
+            X_train = X
+            y_train = y
+            group_train = groups
+            X_test, y_test = None, None
+            group_test = None
+
+        inner_groups = group_train
+
+        # Sklearn cannot handle multi-index
+        index_train = X_train.index
+        X_train.reset_index(drop=True, inplace=True)
+        if nested:
+            index_test = X_test.index
+            X_test.reset_index(drop=True, inplace=True)
+
+        #   Bayes cv_clf
+        start = timeit.default_timer()
+        cv_clf = BayesSearchCV(pipeline, param_grid, n_iter=n_bayes_iter, cv=inner_cv, scoring=scoring, n_jobs=n_jobs,
+                               n_points=max(1, n_jobs), pre_dispatch=2 * n_jobs, return_train_score=True)
+        cv_clf.fit(X_train, y_train, groups=inner_groups)
+
+        duration = timeit.default_timer() - start
+
+        #   Compare train vs. validation vs. test scores (training curve)
+        outer_cv_results["best_train"].append(
+            cv_clf.cv_results_["mean_train_score"][cv_clf.best_index_]
+        )
+        outer_cv_results["best_val"].append(cv_clf.cv_results_["mean_test_score"][cv_clf.best_index_])
+        if name_optim_file:
+            dims = []
+            for param in param_grid.keys():
+                if len(param.split('__')) > 1:
+                    dims.append(param.split('__')[1])
+            try:
+                _ = plot_objective(cv_clf.optimizer_results_[0], dimensions=dims)
+            except:
+                _ = plot_objective(cv_clf.optimizer_results_[0])
+            optim_filepath = "{}optimizer_{}_{}.png".format(filename_base, name_optim_file, i)
+            plt.savefig(optim_filepath)
+
+        if not nested:
+            print("\t\t\tBest train: {}".format(outer_cv_results["best_train"]))
+            print("\t\t\tBest val: {}".format(outer_cv_results["best_val"]))
+
+            outer_cv_results["best_estimator"] = cv_clf.best_estimator_
+            outer_cv_results["best_params"] = cv_clf.cv_results_["params"][cv_clf.best_index_]
+            outer_cv_results["columns"] = X_train.columns
+
+            break
+
+        # Performance metrics on test set
+        y_pred = cv_clf.predict(X_test)
+        try:  # SVM
+            y_pred_decision = cv_clf.decision_function(X_test)
+        except AttributeError:  # RF and XGB
+            y_pred_decision = cv_clf.predict_proba(X_test)[:, 1]
+
+        inner_cv_performances = {
+            "auc": metrics.roc_auc_score(y_test, y_pred_decision),
+            "precision": metrics.precision_score(y_test, y_pred),
+            "recall": metrics.recall_score(y_test, y_pred),
+            "roc_curve": metrics.roc_curve(y_test, y_pred_decision),
+        }
+        for name, result in inner_cv_performances.items():
+            outer_cv_results[name].append(result)
+
+        # Print results for loop
+        print("\t\t\tOuter loop {} done in {} seconds".format(i + 1, int(duration)))
+        print("\t\t\t\tAUC: {}".format(outer_cv_results["auc"]))
+        print("\t\t\t\tPrecision: {}".format(outer_cv_results["precision"]))
+        print("\t\t\t\tRecall: {}".format(outer_cv_results["recall"]))
+        print("\t\t\t\tBest train: {}".format(outer_cv_results["best_train"]))
+        print("\t\t\t\tBest val: {}".format(outer_cv_results["best_val"]))
+
+        # Dataframe for CI on AUC
+        try:
+            subject_index = [i for i, _ in index_test.tolist()]
+        except (ValueError, TypeError) as e:
+            subject_index = index_test.tolist()
+
+        prediction_df = pd.DataFrame({"subject_id": subject_index,
+                                      "y_pred": y_pred_decision,
+                                      "y_true": y_test,
+                                      "cv_fold": i})
+        outer_cv_results["prediction_df"].append(prediction_df)
+
+    # get 95% CI on AUC scores
+    if nested:
+        outer_cv_results["predictions_cv"] = pd.concat(outer_cv_results["prediction_df"], ignore_index=True)
+
+    return outer_cv_results
+
+
+def start_hyperparameter_tuning(data_params, params_clf, df, output_filepath="cv_results.csv"):
     """ Start hyper parameter tuning process with configurations from `param_grid` using `model`.
     Each hyperparameter configuration undergoes a leave-one-participant out cross validation loop.
 
@@ -575,67 +724,37 @@ def start_hyperparameter_tuning(param_grid, df, model, output_filepath="cv_resul
     - `output_filepath`: str, Optional
       The path to save output file. (Default is cv_results.csv)
     """
-    all_params = list(product(*[v for _, v in param_grid.items()]))
+    all_params = list(product(*[v for _, v in params_clf.items()]))
 
-    # if the `output_filepath` existed before, filter out hyperparameters that has already been tested
-    previous_version_existed = os.path.exists(output_filepath)
-    if previous_version_existed:
-        results = pd.read_csv(
-            output_filepath,
-            usecols=list(param_grid.keys()),
-            converters={"data__features": ast.literal_eval} if "data__features" in list(
-                param_grid.keys()) else None
-        )\
-            .replace(np.nan, None)\
-            .values.tolist()
+    fieldnames = list(params_clf.keys())  + \
+                 ['win_size', 'win_stride', 'features'] + \
+                 ["accuracy", "recall_score", "precision_score", "f1_score", "tn", "fp", "fn", "tp", 'auc',
+                  "split_val", "split_train"]
 
-        if len(results) > 0:
-            print(f"previous configurations found: skipped {len(results)}")
-            all_params = [i for i in all_params if list(i) not in results]
-
-    fieldnames = list(param_grid.keys()) + ["accuracy", "recall_score", "precision_score",
-                                            "f1_score", "tn", "fp", "fn", "tp", "split_val", "split_train"]
-
-    # if first time creating the output file, then write csv header
-    if not previous_version_existed:
-        with open(output_filepath, 'a+') as csvfile:
-            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-            writer.writeheader()
-            csvfile.flush()
-            csvfile.close()
+    with open(output_filepath, 'a+') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        writer.writeheader()
+        csvfile.flush()
+        csvfile.close()
 
     cv_splits = list(leave_one_participant_out_cv(df))
 
     outter_pbar = tqdm(all_params, desc="Configurations")
     inner_pbar = tqdm(cv_splits, desc=f"CV", leave=False)
 
-    for param_values in all_params:
-        params = dict(zip(param_grid.keys(), param_values))
-        data_params = {
-            k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "data"}
-        clf_params = {
-            k.split("__")[-1]: v for k, v in params.items() if k.split("__")[0] == "clf"}
 
+    for clf_params in params_clf:
         split_results = []
-
         for train_participants, validation_participant in cv_splits:
             train = df[df['participant'].isin(train_participants)]
             train = train.drop(['timestamp', 'participant'], axis=1)
-            X_train, y_train = preprocess(
-                train.drop(['stress'], axis=1),
-                train['stress'],
-                **data_params
-            )
+            X_train, y_train = preprocess(train.drop(['stress'], axis=1), train['stress'], **data_params)
 
             validation = df[df['participant'].isin([validation_participant])]
             validation = validation.drop(['timestamp', 'participant'], axis=1)
-            X_val, y_val = preprocess(
-                validation.drop(['stress'], axis=1),
-                validation['stress'],
-                **data_params
-            )
+            X_val, y_val = preprocess( validation.drop(['stress'], axis=1), validation['stress'], **data_params)
 
-            clf = model(**clf_params)
+            clf = clf_params['estimator'](**clf_params)
             clf.fit(X_train, y_train)
 
             y_pred = clf.predict(X_val)
@@ -711,9 +830,29 @@ def read_test_result(filepath, param_grid):
     DataFrame
       The test result DataFrame.
     """
-    result = pd.read_csv(filepath)\
-        .drop(['tp', 'fp', 'tn', 'fn'], axis=1)\
-        .groupby(list(param_grid.keys()), dropna=False).agg(['mean', 'std'])\
-        .reset_index()
+    result = pd.read_csv(filepath).drop(['tp', 'fp', 'tn', 'fn'], axis=1)\
+        .groupby(list(param_grid.keys()), dropna=False).agg(['mean', 'std']).reset_index()
     result.columns = ["_".join(c) if c[-1] != "" else c[0] for c in result.columns.to_flat_index()]
     return result
+
+
+def save_cv_results(shelve_path, future=False, test=True):
+    predictions_cv = []
+    with shelve.open(shelve_path) as cv_results:
+        for name, cv in cv_results.items():
+            print(f"\t\t\tName: {name};\tShelve_path: {shelve_path}")
+            cv["predictions_cv"]["clf"] = name
+            predictions_cv.append(cv["predictions_cv"])
+
+    predictions_cv = pd.concat(predictions_cv, ignore_index=True)
+    predictions_cv["outcome"] = 'stress'
+
+    pred_filename_elements = ["predictions_stress"]
+    if test:
+        pred_filename_elements.append("test")
+    pred_filename = "_".join(pred_filename_elements)
+    if future:
+        predictions_cv.to_feather("Results_Future/Models/{}.feather".format(pred_filename))
+    else:
+        predictions_cv.to_feather("Results/Models/{}.feather".format(pred_filename))
+    print("\t\t\tPredictions saved to file: {}".format(pred_filename))
